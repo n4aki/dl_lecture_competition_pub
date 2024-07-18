@@ -1,4 +1,4 @@
-import os, sys
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -8,9 +8,10 @@ from omegaconf import DictConfig
 import wandb
 from termcolor import cprint
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from src.datasets import ThingsMEGDataset
-from src.models import BasicConvClassifier
+from src.models import BasicConvClassifier, LSTMClassifier
 from src.utils import set_seed
 
 
@@ -20,18 +21,19 @@ def run(args: DictConfig):
     logdir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     
     if args.use_wandb:
-        wandb.init(mode="online", dir=logdir, project="MEG-classification")
+        wandb.init(project="MEG-classification", config=args)
+        wandb.run.name = logdir
 
     # ------------------
     #    Dataloader
     # ------------------
     loader_args = {"batch_size": args.batch_size, "num_workers": args.num_workers}
     
-    train_set = ThingsMEGDataset("train", args.data_dir)
+    train_set = ThingsMEGDataset("train", args.data_dir, preprocess=args.preprocess)
     train_loader = torch.utils.data.DataLoader(train_set, shuffle=True, **loader_args)
-    val_set = ThingsMEGDataset("val", args.data_dir)
+    val_set = ThingsMEGDataset("val", args.data_dir, preprocess=args.preprocess)
     val_loader = torch.utils.data.DataLoader(val_set, shuffle=False, **loader_args)
-    test_set = ThingsMEGDataset("test", args.data_dir)
+    test_set = ThingsMEGDataset("test", args.data_dir, preprocess=args.preprocess)
     test_loader = torch.utils.data.DataLoader(
         test_set, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers
     )
@@ -39,9 +41,16 @@ def run(args: DictConfig):
     # ------------------
     #       Model
     # ------------------
-    model = BasicConvClassifier(
-        train_set.num_classes, train_set.seq_len, train_set.num_channels
-    ).to(args.device)
+    if args.model_name == 'cnn':
+        model = BasicConvClassifier(
+            train_set.num_classes, train_set.seq_len, train_set.num_channels
+        ).to(args.device)
+    elif args.model_name == 'lstm':
+        model = LSTMClassifier(
+            train_set.num_classes, train_set.seq_len, train_set.num_channels
+        ).to(args.device)
+    else:
+        raise ValueError(f"Invalid model name: {args.model_name}")
 
     # ------------------
     #     Optimizer
@@ -55,6 +64,8 @@ def run(args: DictConfig):
     accuracy = Accuracy(
         task="multiclass", num_classes=train_set.num_classes, top_k=10
     ).to(args.device)
+    
+    train_losses, train_accuracies, val_losses, val_accuracies = [], [], [], []
       
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
@@ -87,20 +98,31 @@ def run(args: DictConfig):
             val_loss.append(F.cross_entropy(y_pred, y).item())
             val_acc.append(accuracy(y_pred, y).item())
 
+        train_losses.append(np.mean(train_loss))
+        train_accuracies.append(np.mean(train_acc))
+        val_losses.append(np.mean(val_loss))
+        val_accuracies.append(np.mean(val_acc))
+
+        if args.use_wandb:
+            wandb.log({
+                "train_loss": np.mean(train_loss),
+                "train_acc": np.mean(train_acc),
+                "val_loss": np.mean(val_loss),
+                "val_acc": np.mean(val_acc),
+                "epoch": epoch + 1
+            })
+
         print(f"Epoch {epoch+1}/{args.epochs} | train loss: {np.mean(train_loss):.3f} | train acc: {np.mean(train_acc):.3f} | val loss: {np.mean(val_loss):.3f} | val acc: {np.mean(val_acc):.3f}")
         torch.save(model.state_dict(), os.path.join(logdir, "model_last.pt"))
-        if args.use_wandb:
-            wandb.log({"train_loss": np.mean(train_loss), "train_acc": np.mean(train_acc), "val_loss": np.mean(val_loss), "val_acc": np.mean(val_acc)})
         
         if np.mean(val_acc) > max_val_acc:
             cprint("New best.", "cyan")
             torch.save(model.state_dict(), os.path.join(logdir, "model_best.pt"))
             max_val_acc = np.mean(val_acc)
-            
-    
-    # ----------------------------------
+
+    # ------------------
     #  Start evaluation with best model
-    # ----------------------------------
+    # ------------------
     model.load_state_dict(torch.load(os.path.join(logdir, "model_best.pt"), map_location=args.device))
 
     preds = [] 
@@ -111,6 +133,10 @@ def run(args: DictConfig):
     preds = torch.cat(preds, dim=0).numpy()
     np.save(os.path.join(logdir, "submission"), preds)
     cprint(f"Submission {preds.shape} saved at {logdir}", "cyan")
+
+    if args.use_wandb:
+        wandb.save(os.path.join(logdir, "model_best.pt"))
+        wandb.finish()
 
 
 if __name__ == "__main__":
