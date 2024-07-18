@@ -1,13 +1,19 @@
 batch_size: 128
-epochs: 80
-lr: 0.001
+epochs: 30
+lr: 0.01
 
 device: cuda:0
 num_workers: 4
 seed: 1234
-use_wandb: False
+use_wandb: True  # wandbを使用する場合はTrueに設定
 
 data_dir: data
 
 # Evaluation
 model_path: 
+
+# Model selection
+model_name: cnn  # cnnまたはlstmを選択
+
+# Preprocessing flag
+preprocess: True  # 前処理を行う場合はTrue、行わない場合はFalse
